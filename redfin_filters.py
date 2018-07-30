@@ -7,8 +7,8 @@ LOGGER = logging.getLogger(__name__)
 
 MIN_SQFT_PATTERN = r'.*min-sqft=([0-9a-zA-Z]+)-sqft.*'
 MAX_SQFT_PATTERN = r'.*max-sqft=([0-9a-zA-Z]+)-sqft.*'
-MIN_LOT_SIZE = 10
-MAX_LOT_SIZE = 12000
+MIN_SQFT = 10
+MAX_SQFT = 12000
 
 MIN_PRICE_PATTERN = r'.*min-price=([0-9a-zA-Z]+).*'
 MAX_PRICE_PATTERN = r'.*max-price=([0-9a-zA-Z]+).*'
@@ -25,6 +25,18 @@ MAX_YEAR = 2018
 # min-sqft=500-sqft
 REDFIN_BASE_URL = 'https://www.redfin.com/city/17420/CA/San-Jose/'
 BASE_FILTERS = ['include=sold-3yr']
+
+
+class MissPriceException(Exception):
+    pass
+
+
+class MissSqftException(Exception):
+    pass
+
+
+class MissYearException(Exception):
+    pass
 
 
 def parse_filter_params(filter_str):
@@ -59,20 +71,21 @@ def parse_filter_params(filter_str):
 
 
 def construct_filter_url(**kwargs):
-    filters = BASE_FILTERS
-    if 'min_sqft' in kwargs:
-        filters.append('min-sqft={}-sqft'.format(kwargs['min_sqft']))
-    if 'max_sqft' in kwargs:
-        filters.append('max-sqft={}-sqft'.format(kwargs['max_sqft']))
-    if 'min_price' in kwargs:
+    # import pdb; pdb.set_trace()
+    filters = BASE_FILTERS[:]
+    if kwargs.get('min_price'):
         filters.append('min-price={}'.format(kwargs['min_price']))
-    if 'max_price' in kwargs:
+    if kwargs.get('max_price'):
         filters.append('max-price={}'.format(kwargs['max_price']))
-    if 'min_year' in kwargs:
+    if kwargs.get('min_sqft'):
+        filters.append('min-sqft={}-sqft'.format(kwargs['min_sqft']))
+    if kwargs.get('max_sqft'):
+        filters.append('max-sqft={}-sqft'.format(kwargs['max_sqft']))
+    if kwargs.get('min_year'):
         filters.append('min-year-built={}'.format(kwargs['min_year']))
-    if 'max_year' in kwargs:
+    if kwargs.get('max_year'):
         filters.append('max-year-built={}'.format(kwargs['max_year']))
-    return '{}/filter/{}'.format(REDFIN_BASE_URL, ','.join(filters))
+    return '{}filter/{}'.format(REDFIN_BASE_URL, ','.join(filters))
 
 
 def add_sqft_filters(min_sqft, max_sqft):
@@ -145,61 +158,46 @@ def apply_filters(base_url):
     filters = ''
     if '/filter/' not in base_url:
         price_filters = [(1000, 1000000), (1000000, 2000000)]
-        return [construct_filter_url(None, None, x[0], x[1]) for x in price_filters]
+        return [construct_filter_url(min_price=x[0], max_price=x[1]) for x in price_filters]
 
-    base_url, filters = base_url.split('/filter/')
-    min_lot, max_lot, min_price, max_price = parse_filter_params(filters)
+    _, filters = base_url.split('/filter/')
+    filter_params = parse_filter_params(filters)
+    min_price = filter_params.get('min_price')
+    max_price = filter_params.get('max_price')
+    min_sqft = filter_params.get('min_sqft')
+    max_sqft = filter_params.get('max_sqft')
+    min_year = filter_params.get('min_year')
+    max_year = filter_params.get('max_year')
 
-    if min_lot or max_lot:
-        assert (min_price and max_price) and (
-            min_lot and max_lot), 'filters invalid {}'.format(filters)
-        # Granualarity becomes 10 once the min lot is above 1000 sqft.
-        lot_range = max_lot - min_lot
-        lot_filters = []
-        if min_lot < 1000 and max_lot > 1000:
-            lot_filters.extend([(min_lot, 1000), (1000, max_lot)])
+    if min_year:
+        year_filters = add_year_filters(min_year, max_year)
+        if len(year_filters) == 1:
+            LOGGER.warning('Reaching the finest granularity. Cannot split any more.')
+            return [base_url]
+        sub_urls = []
+        for x in year_filters:
+            params = {**filter_params, **{'min_year': x[0], 'max_year': x[1]}}
+            sub_urls.append(construct_filter_url(**params))
+        return sub_urls
+
+    if min_sqft:
+        sqft_filters = add_sqft_filters(min_sqft, max_sqft)
+        if len(sqft_filters) == 1:
+            return [construct_filter_url(**{**filter_params, **{'min_year': MIN_YEAR, 'max_year': MAX_YEAR}})]
         else:
-            min_ticker = 10 if min_lot >= 1000 else 1
-            lot_ticker = lot_range // 5
-            if lot_ticker >= min_ticker:
-                lot_ticker = lot_ticker // min_ticker * min_ticker
-            else:
-                lot_ticker = min_ticker
+            sub_urls = []
+            for x in sqft_filters:
+                params = {**filter_params, **{'min_sqft': x[0], 'max_sqft': x[1]}}
+                sub_urls.append(construct_filter_url(**params))
+            return sub_urls
 
-            tickers = list(range(min_lot, max_lot + 1, lot_ticker))
-            if max_price - tickers[-1] >= lot_ticker:
-                tickers.append(max_price)
-            else:
-                tickers[-1] = max_price
-            lot_filters = list(zip(tickers[:-1], tickers[1:]))
-
-        if len(lot_filters) == 1:
-            LOGGER.info('cannot further split the data.')
-            return []
-
-        return [construct_filter_url(x[0], x[1], min_price, max_price) for x in lot_filters]
-
-    if min_price or max_price:
-        assert min_price and max_price, 'filters invalid {}'.format(filters)
-        price_filters = []
-        if min_price < 1000000 and max_price > 1000000:
-            price_filters.append((min_price, 1000000), (1000000, max_price))
+    if min_price:
+        price_filters = add_price_filters(min_price, max_price)
+        if len(price_filters) == 1:
+            return [construct_filter_url(**{**filter_params, **{'min_sqft': MIN_SQFT, 'max_sqft': 1000}}), construct_filter_url(**{**filter_params, **{'min_sqft': 1000, 'max_sqft': MAX_SQFT}})]
         else:
-            price_diff = max_price - min_price
-            min_ticker = 10000 if min_price >= 1000000 else 1000
-            price_ticker = price_diff // 5
-            if price_ticker >= min_ticker:
-                price_ticker = price_ticker // min_ticker * min_ticker
-            else:
-                price_ticker = min_ticker
-
-            tickers = list(range(min_price, max_price, price_ticker))
-            if max_price - tickers[-1] >= price_ticker:
-                tickers.append(max_price)
-            else:
-                tickers[-1] = max_price
-            price_filters = list(zip(tickers[:-1], tickers[1:]))
-            if len(price_filters) == 1:
-                return apply_filters(
-                    construct_filter_url(MIN_LOT_SIZE, MAX_LOT_SIZE, min_price, max_price))
-        return [construct_filter_url(None, None, x[0], x[1]) for x in price_filters]
+            sub_urls = []
+            for x in price_filters:
+                params = {**filter_params, **{'min_price': x[0], 'max_price': x[1]}}
+                sub_urls.append(construct_filter_url(**params))
+            return sub_urls

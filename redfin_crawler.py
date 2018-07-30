@@ -1,14 +1,16 @@
+import re
 import json
 import random
 import requests
 import logging
 import time
 import pandas as pd
+import argparse
 from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
 import sqlite3
 
-from redfin_filters import apply_filters
+from redfin_filters import apply_filters, construct_filter_url, REDFIN_BASE_URL
 
 
 logging.basicConfig(level=logging.INFO)
@@ -18,7 +20,7 @@ USER_AGENT = {
     'User-agent': 'Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/49.0.2623.112 Safari/537.36'
 }
 
-SQLITE_DB_PATH = 'redfin_scraper.db'
+SQLITE_DB_PATH = 'redfin_scraper_data.db'
 
 
 def construct_proxy(ip_addr, port, user, password):
@@ -28,7 +30,7 @@ def construct_proxy(ip_addr, port, user, password):
     }
 
 
-def create_tables():
+def create_tables_if_not_exist():
     conn = sqlite3.connect(SQLITE_DB_PATH)
     conn.execute('''CREATE TABLE IF NOT EXISTS URLS
              (
@@ -88,6 +90,9 @@ def get_page_info(url_and_proxy):
 
 
 def url_partition(base_url, proxies, max_levels=6):
+    """Partition the listings for a given url into multiple sub-urls, such that
+    each url contains at most 20 properties.
+    """
     urls = [base_url]
     num_levels = 0
     partitioned_urls = []
@@ -242,8 +247,8 @@ def get_paginated_urls():
     return paginated_urls
 
 
-def crawl_info_with_proxies(proxies):
-    small_urls = get_paginated_urls()[:1000]
+def crawl_redfin_with_proxies(proxies):
+    small_urls = get_paginated_urls()
     rand_move = random.randint(0, len(proxies) - 1)
     scrape_inputs, scraper_results = [], []
     for i, url in enumerate(small_urls):
@@ -267,11 +272,20 @@ def crawl_info_with_proxies(proxies):
                 LOGGER.info(e)
 
 
-def get_properties(proxies_csv_path, output_csv_path):
-    proxies = pd.read_csv(proxies_csv_path, encoding='utf-8').values
-    crawl_info_with_proxies(proxies)
-
-
 if __name__ == '__main__':
-    create_tables()
-    get_properties('/Users/your_name/Desktop/good_proxies.csv', '/Users/your_name/Desktop/results')
+    parser = argparse.ArgumentParser(description='Scrape Redfin property data.')
+    parser.add_argument('--type', default='pages', choices=['properties', 'pages'],
+                        help='pages or properties (default: properties)')
+
+    parser.add_argument('proxy_csv_path', help='proxies csv path')
+    args = parser.parse_args()
+
+    create_tables_if_not_exist()
+    proxies = pd.read_csv(args.proxy_csv_path, encoding='utf-8').values
+    import pdb; pdb.set_trace()
+    if args.type == 'pages':
+        url_partition(construct_filter_url(REDFIN_BASE_URL), proxies, max_levels=2)
+    elif args.type == 'properties':
+        crawl_redfin_with_proxies(proxies)
+    else:
+        raise Exception('Unknown type {}'.format(args.type))
