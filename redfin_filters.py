@@ -23,7 +23,6 @@ MAX_YEAR = 2018
 # /filter/min-price=750k,max-price=780k,min-lot-size=3k-sqft,max-lot-size=4k-sqft,include=sold-3yr
 # min-year-built=2016
 # min-sqft=500-sqft
-REDFIN_BASE_URL = 'https://www.redfin.com/city/17420/CA/San-Jose/'
 BASE_FILTERS = ['include=sold-3yr']
 
 
@@ -70,7 +69,7 @@ def parse_filter_params(filter_str):
     }
 
 
-def construct_filter_url(**kwargs):
+def construct_filter_url(redfin_base_url, **kwargs):
     # import pdb; pdb.set_trace()
     filters = BASE_FILTERS[:]
     if kwargs.get('min_price'):
@@ -85,7 +84,7 @@ def construct_filter_url(**kwargs):
         filters.append('min-year-built={}'.format(kwargs['min_year']))
     if kwargs.get('max_year'):
         filters.append('max-year-built={}'.format(kwargs['max_year']))
-    return '{}filter/{}'.format(REDFIN_BASE_URL, ','.join(filters))
+    return '{}filter/{}'.format(redfin_base_url, ','.join(filters))
 
 
 def add_sqft_filters(min_sqft, max_sqft):
@@ -149,19 +148,23 @@ def add_year_filters(min_year, max_year):
     return year_filters
 
 
-def apply_filters(base_url):
+def apply_filters(url):
     """Apply more filters to make it more fine-grained.
     Return a list of urls containing filters, which adds up
     to the original url.
     Filter priority: price, sqft-size, year-built
     """
-    filters = ''
-    if '/filter/' not in base_url:
+    if '/filter/' not in url:
         price_filters = [(1000, 1000000), (1000000, 2000000)]
-        return [construct_filter_url(min_price=x[0], max_price=x[1]) for x in price_filters]
+        return [construct_filter_url(redfin_base_url, min_price=x[0], max_price=x[1]) for x in price_filters]
 
-    _, filters = base_url.split('/filter/')
+    _, filters = url.split('/filter/')
     filter_params = parse_filter_params(filters)
+    filter_params = {k: v for k, v in filter_params.items() if v is not None}
+    if not filter_params:
+        price_filters = [(1000, 1000000), (1000000, 2000000)]
+        return [construct_filter_url(redfin_base_url, min_price=x[0], max_price=x[1]) for x in price_filters]
+
     min_price = filter_params.get('min_price')
     max_price = filter_params.get('max_price')
     min_sqft = filter_params.get('min_sqft')
@@ -173,31 +176,31 @@ def apply_filters(base_url):
         year_filters = add_year_filters(min_year, max_year)
         if len(year_filters) == 1:
             LOGGER.warning('Reaching the finest granularity. Cannot split any more.')
-            return [base_url]
+            return [url]
         sub_urls = []
         for x in year_filters:
             params = {**filter_params, **{'min_year': x[0], 'max_year': x[1]}}
-            sub_urls.append(construct_filter_url(**params))
+            sub_urls.append(construct_filter_url(redfin_base_url, **params))
         return sub_urls
 
     if min_sqft:
         sqft_filters = add_sqft_filters(min_sqft, max_sqft)
         if len(sqft_filters) == 1:
-            return [construct_filter_url(**{**filter_params, **{'min_year': MIN_YEAR, 'max_year': MAX_YEAR}})]
+            return [construct_filter_url(redfin_base_url, **{**filter_params, **{'min_year': MIN_YEAR, 'max_year': MAX_YEAR}})]
         else:
             sub_urls = []
             for x in sqft_filters:
                 params = {**filter_params, **{'min_sqft': x[0], 'max_sqft': x[1]}}
-                sub_urls.append(construct_filter_url(**params))
+                sub_urls.append(construct_filter_url(redfin_base_url, **params))
             return sub_urls
 
     if min_price:
         price_filters = add_price_filters(min_price, max_price)
         if len(price_filters) == 1:
-            return [construct_filter_url(**{**filter_params, **{'min_sqft': MIN_SQFT, 'max_sqft': 1000}}), construct_filter_url(**{**filter_params, **{'min_sqft': 1000, 'max_sqft': MAX_SQFT}})]
+            return [construct_filter_url(redfin_base_url, **{**filter_params, **{'min_sqft': MIN_SQFT, 'max_sqft': 1000}}), construct_filter_url(redfin_base_url, **{**filter_params, **{'min_sqft': 1000, 'max_sqft': MAX_SQFT}})]
         else:
             sub_urls = []
             for x in price_filters:
                 params = {**filter_params, **{'min_price': x[0], 'max_price': x[1]}}
-                sub_urls.append(construct_filter_url(**params))
+                sub_urls.append(construct_filter_url(redfin_base_url, **params))
             return sub_urls

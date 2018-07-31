@@ -6,11 +6,11 @@ import logging
 import time
 import pandas as pd
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from bs4 import BeautifulSoup
 import sqlite3
 
-from redfin_filters import apply_filters, construct_filter_url, REDFIN_BASE_URL
+from redfin_filters import apply_filters, construct_filter_url
 
 
 logging.basicConfig(level=logging.INFO)
@@ -19,7 +19,7 @@ LOGGER = logging.getLogger(__name__)
 USER_AGENT = {
     'User-agent': 'Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/49.0.2623.112 Safari/537.36'
 }
-
+REDFIN_BASE_URL = 'https://www.redfin.com/city/17420/CA/San-Jose/'
 SQLITE_DB_PATH = 'redfin_scraper_data.db'
 
 
@@ -68,7 +68,11 @@ def get_page_info(url_and_proxy):
         resp = session.get(url, headers=USER_AGENT, proxies=proxy)
         if resp.status_code == 200:
             bf = BeautifulSoup(resp.text, 'lxml')
-            page_description = bf.find('div', {'class': 'homes summary'}).get_text()
+            page_description_div = bf.find('div', {'class': 'homes summary'})
+            if not page_description_div:
+                # The page has nothing!
+                return(url, 0, 0, 20)
+            page_description = page_description_div.get_text()
             if 'of' in page_description:
                 property_cnt_pattern = r'Showing ([0-9]+) of ([0-9]+) .*'
                 m = re.match(property_cnt_pattern, page_description)
@@ -84,14 +88,14 @@ def get_page_info(url_and_proxy):
                     properties_per_page = int(m.group(1))
                 num_pages = 1
     except Exception as e:
-        LOGGER.exception('Swallowing exception {}'.format(e))
+        LOGGER.exception('Swallowing exception {} on url {}'.format(e, url))
 
     return (url, total_properties, num_pages, properties_per_page)
 
 
 def url_partition(base_url, proxies, max_levels=6):
-    """Partition the listings for a given url into multiple sub-urls, such that
-    each url contains at most 20 properties.
+    """Partition the listings for a given url into multiple sub-urls,
+    such that each url contains at most 20 properties.
     """
     urls = [base_url]
     num_levels = 0
@@ -104,7 +108,7 @@ def url_partition(base_url, proxies, max_levels=6):
             partition_inputs.append((url, proxy))
 
         scraper_results = []
-        with ThreadPoolExecutor(max_workers=50) as executor:
+        with ThreadPoolExecutor(max_workers=min(50, len(partition_inputs))) as executor:
             scraper_results = list(executor.map(get_page_info, partition_inputs))
 
         LOGGER.info('Getting {} results'.format(len(scraper_results)))
@@ -116,7 +120,7 @@ def url_partition(base_url, proxies, max_levels=6):
                 to_nulls = [x if x else 'NULL' for x in result]
                 values.append("('{}', {}, {}, {})".format(*to_nulls))
             cursor = db.cursor()
-            LOGGER.info('values {}'.format(values))
+            # LOGGER.info('values {}'.format(values))
             cursor.execute("""
                 INSERT INTO URLS (URL, NUM_PROPERTIES, NUM_PAGES, PER_PAGE_PROPERTIES)
                 VALUES {};
@@ -127,7 +131,10 @@ def url_partition(base_url, proxies, max_levels=6):
         for result in scraper_results:
             if result[1] and result[2] and result[3] and result[1] > result[2] * result[3]:
                 expanded_urls = apply_filters(result[0])
-                new_urls.extend(expanded_urls)
+                if len(expanded_urls) == 1 and expanded_urls[0] == result[0]:
+                    LOGGER.info('Cannot further split {}'.format(result[0]))
+                else:
+                    new_urls.extend(expanded_urls)
             else:
                 partitioned_urls.append(result)
                 # LOGGER.info('skipping url {}'.format(result))
@@ -215,11 +222,15 @@ def parse_addresses():
 
 
 def scrape_page(url_proxy):
-    url, proxy = url_proxy
-    session = requests.Session()
-    resp = session.get(url, headers=USER_AGENT, proxies=proxy)
-    bf = BeautifulSoup(resp.text, 'lxml')
-    details = [json.loads(x.text) for x in bf.find_all('script', type='application/ld+json')]
+    try:
+        url, proxy = url_proxy
+        session = requests.Session()
+        resp = session.get(url, headers=USER_AGENT, proxies=proxy)
+        bf = BeautifulSoup(resp.text, 'lxml')
+        details = [json.loads(x.text) for x in bf.find_all('script', type='application/ld+json')]
+    except Exception as e:
+        pass
+        # LOGGER.exception('failed for url {}, proxy {}'.format(url, proxy))
     return url, json.dumps(details)
 
 
@@ -236,9 +247,14 @@ def get_paginated_urls():
             url, num_properties, num_pages, per_page_properties = row
             if url in seen_urls:
                 continue
+            if num_properties == 0:
+                continue
             urls = []
+            # print(num_properties, num_pages, per_page_properties, url)
             if not num_pages:
                 urls = [url]
+            elif (not num_properties) and int(num_pages) == 1 and per_page_properties:
+                urls = ['{},sort=lo-price/page-1'.format(url)]
             elif num_properties < num_pages * per_page_properties:
                 # Build per page urls.
                 # print('num pages {}'.format(num_pages))
@@ -255,20 +271,22 @@ def crawl_redfin_with_proxies(proxies):
         proxy = construct_proxy(*proxies[(rand_move + i) % len(proxies)])
         scrape_inputs.append((url, proxy))
 
-    with ThreadPoolExecutor(max_workers=min(50, len(scrape_inputs))) as executor:
+    with ProcessPoolExecutor(max_workers=min(50, len(scrape_inputs))) as executor:
         scraper_results = list(executor.map(scrape_page, scrape_inputs))
+
+    LOGGER.warning('Finished scraping!')
 
     with sqlite3.connect(SQLITE_DB_PATH) as db:
         cursor = db.cursor()
         for result in scraper_results:
-            value = "('{}', '{}')".format(*result)
+            url, info = result
             try:
                 cursor.execute("""
                     INSERT INTO LISTINGS (URL, INFO)
-                    VALUES {};
-                """.format(value))
+                    VALUES (?, ?);
+                """.format(url, info))
             except Exception as e:
-                LOGGER.info('failed record: {}'.format(value))
+                LOGGER.info('failed record: {}'.format(result))
                 LOGGER.info(e)
 
 
@@ -282,10 +300,10 @@ if __name__ == '__main__':
 
     create_tables_if_not_exist()
     proxies = pd.read_csv(args.proxy_csv_path, encoding='utf-8').values
-    import pdb; pdb.set_trace()
     if args.type == 'pages':
-        url_partition(construct_filter_url(REDFIN_BASE_URL), proxies, max_levels=2)
+        url_partition(construct_filter_url(REDFIN_BASE_URL), proxies, max_levels=8)
     elif args.type == 'properties':
+        url_partition(construct_filter_url(REDFIN_BASE_URL), proxies, max_levels=8)
         crawl_redfin_with_proxies(proxies)
     else:
         raise Exception('Unknown type {}'.format(args.type))
