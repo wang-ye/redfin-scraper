@@ -70,7 +70,6 @@ def parse_filter_params(filter_str):
 
 
 def construct_filter_url(redfin_base_url, **kwargs):
-    # import pdb; pdb.set_trace()
     filters = BASE_FILTERS[:]
     if kwargs.get('min_price'):
         filters.append('min-price={}'.format(kwargs['min_price']))
@@ -148,7 +147,7 @@ def add_year_filters(min_year, max_year):
     return year_filters
 
 
-def apply_filters(url):
+def apply_filters(url, redfin_base_url):
     """Apply more filters to make it more fine-grained.
     Return a list of urls containing filters, which adds up
     to the original url.
