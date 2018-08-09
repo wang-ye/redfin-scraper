@@ -302,9 +302,9 @@ if __name__ == '__main__':
     create_tables_if_not_exist()
     proxies = pd.read_csv(args.proxy_csv_path, encoding='utf-8').values
     if args.type == 'pages':
-        url_partition(args.redfin_base_url, proxies, max_levels=9)
+        url_partition(args.redfin_base_url, proxies, max_levels=12)
     elif args.type == 'properties':
-        url_partition(args.redfin_base_url, proxies, max_levels=9)
+        url_partition(args.redfin_base_url, proxies, max_levels=12)
         crawl_redfin_with_proxies(proxies)
         parse_addresses()
     elif args.type == 'property_details':
