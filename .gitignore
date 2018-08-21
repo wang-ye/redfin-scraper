@@ -118,3 +118,4 @@ postgres-data/
 # Personal gitignore
 *.db
 good_proxies.csv
+__MACOSX/

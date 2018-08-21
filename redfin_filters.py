@@ -154,14 +154,15 @@ def apply_filters(url, redfin_base_url):
     Filter priority: price, sqft-size, year-built
     """
     if '/filter/' not in url:
-        price_filters = [(1000, 1000000), (1000000, 2000000)]
+        price_filters = [(1000, 300000), (300000, 600000), (600000, 1000000), (1000000, 2000000)]
         return [construct_filter_url(redfin_base_url, min_price=x[0], max_price=x[1]) for x in price_filters]
 
     _, filters = url.split('/filter/')
     filter_params = parse_filter_params(filters)
     filter_params = {k: v for k, v in filter_params.items() if v is not None}
     if not filter_params:
-        price_filters = [(1000, 1000000), (1000000, 2000000)]
+        # Make it a bit fine-grained to take care of cities with 100k+ listings.
+        price_filters = [(1000, 300000), (300000, 600000), (600000, 1000000), (1000000, 2000000)]
         return [construct_filter_url(redfin_base_url, min_price=x[0], max_price=x[1]) for x in price_filters]
 
     min_price = filter_params.get('min_price')

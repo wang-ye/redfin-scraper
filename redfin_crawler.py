@@ -19,7 +19,6 @@ LOGGER = logging.getLogger(__name__)
 USER_AGENT = {
     'User-agent': 'Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/49.0.2623.112 Safari/537.36'
 }
-REDFIN_BASE_URL = 'https://www.redfin.com/city/17420/CA/San-Jose/'
 SQLITE_DB_PATH = 'redfin_scraper_data.db'
 
 
@@ -223,6 +222,8 @@ def parse_addresses():
 
 
 def scrape_page(url_proxy):
+    time.sleep(random.random() * 16)
+    details = []
     try:
         url, proxy = url_proxy
         session = requests.Session()
@@ -230,12 +231,11 @@ def scrape_page(url_proxy):
         bf = BeautifulSoup(resp.text, 'lxml')
         details = [json.loads(x.text) for x in bf.find_all('script', type='application/ld+json')]
     except Exception as e:
-        pass
-        # LOGGER.exception('failed for url {}, proxy {}'.format(url, proxy))
+        LOGGER.exception('failed for url {}, proxy {}'.format(url, proxy))
     return url, json.dumps(details)
 
 
-def get_paginated_urls():
+def get_paginated_urls(prefix):
     # Return a set of paginated urls with at most 20 properties each.
     paginated_urls = []
     with sqlite3.connect(SQLITE_DB_PATH) as db:
@@ -246,6 +246,8 @@ def get_paginated_urls():
         seen_urls = set()
         for row in cursor:
             url, num_properties, num_pages, per_page_properties = row
+            if prefix and (prefix not in url):
+                continue
             if url in seen_urls:
                 continue
             if num_properties == 0:
@@ -261,11 +263,11 @@ def get_paginated_urls():
                 # print('num pages {}'.format(num_pages))
                 urls = ['{},sort=lo-price/page-{}'.format(url, p) for p in range(1, num_pages + 1)]
             paginated_urls.extend(urls)
-    return paginated_urls
+    return list(set(paginated_urls))
 
 
-def crawl_redfin_with_proxies(proxies):
-    small_urls = get_paginated_urls()
+def crawl_redfin_with_proxies(proxies, prefix=''):
+    small_urls = get_paginated_urls(prefix)
     rand_move = random.randint(0, len(proxies) - 1)
     scrape_inputs, scraper_results = [], []
     for i, url in enumerate(small_urls):
@@ -284,8 +286,7 @@ def crawl_redfin_with_proxies(proxies):
             try:
                 cursor.execute("""
                     INSERT INTO LISTINGS (URL, INFO)
-                    VALUES (?, ?);
-                """.format(url, info))
+                    VALUES (?, ?)""", (url, info))
             except Exception as e:
                 LOGGER.info('failed record: {}'.format(result))
                 LOGGER.info(e)
@@ -295,19 +296,27 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Scrape Redfin property data.')
     parser.add_argument('proxy_csv_path', help='proxies csv path')
     parser.add_argument('redfin_base_url', help='Redfin base url, e.g., https://www.redfin.com/city/11203/CA/Los-Angeles/')
-    parser.add_argument('--type', default='pages', choices=['properties', 'pages', 'property_details'],
+    parser.add_argument('--type', default='pages', choices=['properties', 'pages', 'property_details', 'filtered_properties'],
                         help='pages or properties (default: properties)')
+    parser.add_argument('--property_prefix', default='',
+                        help='The property prefix for crawling')
     args = parser.parse_args()
 
     create_tables_if_not_exist()
+    redfin_base_url = args.redfin_base_url
+    if redfin_base_url[-1] != '/':
+        redfin_base_url += '/'
+
     proxies = pd.read_csv(args.proxy_csv_path, encoding='utf-8').values
     if args.type == 'pages':
-        url_partition(args.redfin_base_url, proxies, max_levels=12)
+        url_partition(redfin_base_url, proxies, max_levels=12)
     elif args.type == 'properties':
-        url_partition(args.redfin_base_url, proxies, max_levels=12)
+        url_partition(redfin_base_url, proxies, max_levels=12)
         crawl_redfin_with_proxies(proxies)
         parse_addresses()
     elif args.type == 'property_details':
         parse_addresses()
+    elif args.type == 'filtered_properties':
+        crawl_redfin_with_proxies(proxies, args.property_prefix)
     else:
         raise Exception('Unknown type {}'.format(args.type))
