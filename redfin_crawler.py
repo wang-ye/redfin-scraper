@@ -79,7 +79,6 @@ def get_page_info(url_and_proxy):
                 # The page has nothing!
                 return(url, 0, 0, 20)
             page_description = page_description_div.get_text()
-            LOGGER.info(f"{url}: {page_description}")
             if 'of' in page_description:
                 property_cnt_pattern = r'Showing ([0-9]+) of ([0-9]+) .*'
                 m = re.match(property_cnt_pattern, page_description)

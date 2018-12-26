@@ -16,12 +16,14 @@ Please refer to *algorithm_sketch.md*.
 The repo assumes the use of proxies with user and password authorization.
 If your proxies do not need authorization, you can just have the csv file like
 ```
+ip,port
 a.b.c.d,2345
 e.f.g.h,1234
 ...
 ```
 Otherwise, your csv proxy file can be
 ```
+ip,port,user,password
 a.b.c.d,2345,user1,pass1
 e.f.g.h,1234,user2,pass2
 ...
