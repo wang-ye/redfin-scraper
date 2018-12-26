@@ -12,20 +12,24 @@ import sqlite3
 
 from redfin_filters import apply_filters
 
-
-logging.basicConfig(level=logging.INFO)
-LOGGER = logging.getLogger(__name__)
-
-USER_AGENT = {
-    'User-agent': 'Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/49.0.2623.112 Safari/537.36'
+LOGGER = None
+HEADER = {
+    'User-agent': 'Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko)'\
+                  ' Chrome/49.0.2623.112 Safari/537.36'
 }
 SQLITE_DB_PATH = 'redfin_scraper_data.db'
 
 
-def construct_proxy(ip_addr, port, user, password):
+def construct_proxy(ip_addr, port, user=None, password=None):
+    if user:
+        return {
+            'http': f'http://{user}:{password}@{ip_addr}:{port}',
+            'https': f'https://{user}:{password}@{ip_addr}:{port}',
+        }
+
     return {
-        'http': 'http://{}:{}@{}:{}'.format(user, password, ip_addr, port),
-        'https': 'https://{}:{}@{}:{}'.format(user, password, ip_addr, port),
+        'http': f'http://{ip_addr}:{port}',
+        'https': f'https://{ip_addr}:{port}',
     }
 
 
@@ -65,7 +69,9 @@ def get_page_info(url_and_proxy):
     session = requests.Session()
     total_properties, num_pages, properties_per_page = None, None, None
     try:
-        resp = session.get(url, headers=USER_AGENT, proxies=proxy)
+        resp = session.get(url, headers=HEADER, proxies=proxy)
+        resp.raise_for_status()
+
         if resp.status_code == 200:
             bf = BeautifulSoup(resp.text, 'lxml')
             page_description_div = bf.find('div', {'class': 'homes summary'})
@@ -73,6 +79,7 @@ def get_page_info(url_and_proxy):
                 # The page has nothing!
                 return(url, 0, 0, 20)
             page_description = page_description_div.get_text()
+            LOGGER.info(f"{url}: {page_description}")
             if 'of' in page_description:
                 property_cnt_pattern = r'Showing ([0-9]+) of ([0-9]+) .*'
                 m = re.match(property_cnt_pattern, page_description)
@@ -89,7 +96,6 @@ def get_page_info(url_and_proxy):
                 num_pages = 1
     except Exception as e:
         LOGGER.exception('Swallowing exception {} on url {}'.format(e, url))
-
     return (url, total_properties, num_pages, properties_per_page)
 
 
@@ -105,6 +111,7 @@ def url_partition(base_url, proxies, max_levels=6):
         partition_inputs = []
         for i, url in enumerate(urls):
             proxy = construct_proxy(*proxies[(rand_move + i) % len(proxies)])
+            LOGGER.debug(f"scraping url {url} with proxy {proxy}")
             partition_inputs.append((url, proxy))
 
         scraper_results = []
@@ -120,7 +127,6 @@ def url_partition(base_url, proxies, max_levels=6):
                 to_nulls = [x if x else 'NULL' for x in result]
                 values.append("('{}', {}, {}, {})".format(*to_nulls))
             cursor = db.cursor()
-            # LOGGER.info('values {}'.format(values))
             cursor.execute("""
                 INSERT INTO URLS (URL, NUM_PROPERTIES, NUM_PAGES, PER_PAGE_PROPERTIES)
                 VALUES {};
@@ -129,7 +135,7 @@ def url_partition(base_url, proxies, max_levels=6):
         LOGGER.info('Writing to sqlite {} results'.format(len(scraper_results)))
         new_urls = []
         for result in scraper_results:
-            if result[1] and result[2] and result[3] and result[1] > result[2] * result[3]:
+            if (result[1] and result[2] and result[3] and result[1] > result[2] * result[3]) or (num_levels == 0):
                 expanded_urls = apply_filters(result[0], base_url)
                 if len(expanded_urls) == 1 and expanded_urls[0] == result[0]:
                     LOGGER.info('Cannot further split {}'.format(result[0]))
@@ -137,7 +143,6 @@ def url_partition(base_url, proxies, max_levels=6):
                     new_urls.extend(expanded_urls)
             else:
                 partitioned_urls.append(result)
-                # LOGGER.info('skipping url {}'.format(result))
         LOGGER.info('stage {}: running for {} urls. We already captured {} urls'.format(
             num_levels, len(new_urls), len(partitioned_urls)))
         urls = new_urls
@@ -161,7 +166,8 @@ def parse_addresses():
             listings_on_page = (json.loads(json_details))
             for listing in listings_on_page:
                 # print('listing {}'.format(listing))
-                num_rooms, name, country, region, locality, street, postal, house_type, price = None, None, None, None, None, None, None, None, None
+                num_rooms, name, country, region, locality, street, postal, house_type, price = \
+                    None, None, None, None, None, None, None, None, None
                 listing_url = None
                 if (not isinstance(listing, list)) and (not isinstance(listing, dict)):
                     continue
@@ -179,7 +185,8 @@ def parse_addresses():
                         street = address_details.get('streetAddress')
                         postal = address_details.get('postalCode')
                         house_type = info.get('@type')
-                        listing_details[listing_url] = (listing_url, num_rooms, name, country, region, locality, street, postal, house_type, price)
+                        listing_details[listing_url] = (listing_url, num_rooms, name, country,
+                                                        region, locality, street, postal, house_type, price)
                     continue
 
                 for info in listing:
@@ -197,7 +204,8 @@ def parse_addresses():
                     if 'offers' in info:
                         price = info['offers'].get('price')
                 if listing_url:
-                    listing_details[listing_url] = (listing_url, num_rooms, name, country, region, locality, street, postal, house_type, price)
+                    listing_details[listing_url] = (listing_url, num_rooms, name, country,
+                                                    region, locality, street, postal, house_type, price)
 
     # print(listing_details)
     with sqlite3.connect(SQLITE_DB_PATH) as db:
@@ -227,7 +235,7 @@ def scrape_page(url_proxy):
     try:
         url, proxy = url_proxy
         session = requests.Session()
-        resp = session.get(url, headers=USER_AGENT, proxies=proxy)
+        resp = session.get(url, headers=HEADER, proxies=proxy)
         bf = BeautifulSoup(resp.text, 'lxml')
         details = [json.loads(x.text) for x in bf.find_all('script', type='application/ld+json')]
     except Exception as e:
@@ -294,13 +302,34 @@ def crawl_redfin_with_proxies(proxies, prefix=''):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Scrape Redfin property data.')
-    parser.add_argument('proxy_csv_path', help='proxies csv path')
-    parser.add_argument('redfin_base_url', help='Redfin base url, e.g., https://www.redfin.com/city/11203/CA/Los-Angeles/')
-    parser.add_argument('--type', default='pages', choices=['properties', 'pages', 'property_details', 'filtered_properties'],
+    parser.add_argument(
+        'proxy_csv_path',
+        help='proxies csv path. '
+             'It should contain ip_addr,port,user,password if using proxies with auth. '
+             'Or just contain ip_addr,port columns if no auth needed.'
+    )
+    parser.add_argument(
+        'redfin_base_url',
+        help='Redfin base url to specify the crawling location, '
+             'e.g., https://www.redfin.com/city/11203/CA/Los-Angeles/'
+    )
+    parser.add_argument('--type', default='pages',
+                        choices=['properties', 'pages', 'property_details', 'filtered_properties'],
                         help='pages or properties (default: properties)')
     parser.add_argument('--property_prefix', default='',
                         help='The property prefix for crawling')
+    parser.add_argument('--partition_levels',
+                        help="Determine the depth of partition. The higher the more properties scraped.",
+                        type=int,
+                        default=12)
+    parser.add_argument('--logging_level', default='info', choices=['info', 'debug'])
     args = parser.parse_args()
+
+    if args.logging_level == 'info':
+        logging.basicConfig(level=logging.INFO)
+    elif args.logging_level == 'debug':
+        logging.basicConfig(level=logging.DEBUG)
+    LOGGER = logging.getLogger(__name__)
 
     create_tables_if_not_exist()
     redfin_base_url = args.redfin_base_url
@@ -309,9 +338,9 @@ if __name__ == '__main__':
 
     proxies = pd.read_csv(args.proxy_csv_path, encoding='utf-8').values
     if args.type == 'pages':
-        url_partition(redfin_base_url, proxies, max_levels=12)
+        url_partition(redfin_base_url, proxies, max_levels=args.partition_levels)
     elif args.type == 'properties':
-        url_partition(redfin_base_url, proxies, max_levels=12)
+        url_partition(redfin_base_url, proxies, max_levels=args.partition_levels)
         crawl_redfin_with_proxies(proxies)
         parse_addresses()
     elif args.type == 'property_details':
